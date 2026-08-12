@@ -110,8 +110,18 @@ python3 broker.py   # 0.0.0.0:8787 で待受
 1. ~~`VoiceInteractionAppSample` のURLハードコードをローカルサーバーに向ける変更~~ →
    [#43](https://github.com/aRaikoFunakami/VoiceInteractionAppSample/issues/43) で対応済み
    （設定画面から切り替え可能に。PR #44, #45）。
-2. 実機/エミュレータでの通しの動作確認（発話→STT→LLM→TTS→再生）。
-3. 発話終了から音声再生開始までのレイテンシ実測。
+2. ~~実機/エミュレータでの通しの動作確認~~ → **接続プロトコル部分は確認済み**
+   （AAOS emulator `Automotive_1408p_landscape`、設定画面でLOCAL/`10.0.2.2`を選択、
+   `adb shell cmd voiceinteraction show` でセッション起動）。
+   credential取得(1012ms) → SDP offer/answer(2009ms) → ICE CONNECTED/COMPLETED(~2.5s) →
+   `session.created`/`session.updated`受信（日本語instructions・server_vad・
+   whisper-1/ja・tools一式が正しくecho backされている）→ マイク録音開始 →
+   無音のままidle timeout(10s)でクリーンに切断、をクライアント/サーバー両方のログで確認。
+   エラーなし。
+   **未検証**: 実際の発話→STT→LLM→TTS→再生。エミュレータの仮想マイクへホスト実マイクの
+   音声を通すには Extended Controls > Microphone > Enable Host Microphone Access を有効にし
+   人が実際に話す必要があり、自動化できないためユーザー自身の確認が必要。
+3. 発話終了から音声再生開始までのレイテンシ実測（上記の実発話テストと合わせて実施）。
 
 ## Phase 2 (予定): Mac Studio 256GB
 
