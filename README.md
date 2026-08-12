@@ -110,16 +110,22 @@ flowchart LR
 
 ## セットアップ
 
+[uv](https://docs.astral.sh/uv/)でPythonバージョンと依存関係をロックしている
+（`.python-version`=3.12、`pyproject.toml`/`uv.lock`）。uvが無ければ
+`curl -LsSf https://astral.sh/uv/install.sh | sh`。
+
 ```bash
-python3.12 -m venv .venv   # mlx系エコシステムの追随が速くないため3.14ではなく3.12を使う
-source .venv/bin/activate
-pip install "speech-to-speech[webrtc]"   # mlx/mlx-lm/mlx-audioはDarwinのコア依存に含まれる
+uv sync
 ```
+
+これだけで、Python 3.12（無ければuvが自動取得）+ `speech-to-speech[webrtc]==0.2.12`
+（および固定された全依存）が`.venv`に入る。`python3.12`をシステムに手動で
+用意する必要はない（Mac Studioなど別マシンでも`uv sync`だけで同じ環境を再現できる）。
 
 ## 起動
 
 ```bash
-speech-to-speech \
+uv run speech-to-speech \
   --mode realtime \
   --device mps \
   --stt mlx-audio-whisper \
@@ -136,8 +142,38 @@ speech-to-speech \
 別ターミナルでセッションブローカー（クライアントの認証情報取得先スタブ）を起動:
 
 ```bash
-python3 broker.py   # 0.0.0.0:8787
+uv run python broker.py   # 0.0.0.0:8787
 ```
+
+### モデルの扱い（自動ダウンロード / 事前ダウンロード）
+
+`--model_name` / `--mlx_audio_whisper_model_name` / `--qwen3_tts_model_name`に
+Hugging Face Hub上のリポジトリIDを渡すと、起動時に`huggingface_hub`が自動で
+ダウンロードして`~/.cache/huggingface/hub/`にキャッシュする（2回目以降の起動は
+キャッシュを使うので速い）。何もしなくてよい。
+
+個別に事前ダウンロードしてから使いたい場合は2通りある:
+
+**方法1: デフォルトキャッシュに落としておく**（コード変更不要、同じモデル名を
+指定すれば自動でキャッシュを使う）
+
+```bash
+uv run hf download mlx-community/Qwen3.5-9B-4bit
+uv run hf download mlx-community/whisper-large-v3-turbo
+uv run hf download mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16
+```
+
+**方法2: 任意のローカルディレクトリに落として、そのパスを直接指定**
+（HFへのアクセスなしでオフライン運用したい・他のMacにモデルフォルダごと
+コピーしたい場合向け）
+
+```bash
+uv run hf download mlx-community/Qwen3.5-9B-4bit --local-dir ./models/Qwen3.5-9B-4bit
+# 起動時: --model_name ./models/Qwen3.5-9B-4bit
+```
+
+完全オフラインで起動できるか（＝必要なモデルが揃っているか）は
+`HF_HUB_OFFLINE=1 uv run speech-to-speech ...`で確認できる。
 
 ヘルスチェック:
 
