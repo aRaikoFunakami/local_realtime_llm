@@ -59,6 +59,16 @@ STT/LLM/TTSに接続する。LLM/STT/TTSは差し替え可能にする。
 - 診断手法として、`STT/mlx_audio_whisper_handler.py`の`process()`冒頭に
   `S2S_DUMP_AUDIO_DIR`環境変数でWAVダンプするフックを一時的に追加すると、実際に
   Whisperへ渡っている音声を直接確認できる（venv内への一時パッチ、gitでは追跡されない）。
+- **`Qwen3-4B`（bf16でも4bitでも）はfunction calling（tool call）を確実に発行できない。**
+  ログの`Tools: []`は「toolsスキーマが未登録」ではなく「このターンでLLMが実際に
+  ツール呼び出しを発行しなかった」の意味（`ctx.tools`＝出力から抽出された呼び出し結果。
+  スキーマ自体は`session.tools`に正しく載っている）。4Bモデルは`open_youtube_search`を
+  依頼されても平文で「検索します」と答えるだけでツール呼び出し用の特殊マーカー形式を
+  出力しないことがある（プロンプトベースのtool-calling方式のため、小さいモデルほど
+  形式追従が不安定）。`mlx-community/Qwen3.5-9B-4bit`に上げたところ確実に
+  `ResponseFunctionToolCall(name='open_youtube_search', ...)`が発行されるようになった。
+  レイテンシは伸びる（下記参照）。品質とレイテンシのトレードオフとして4Bではなく
+  9Bを最低ラインにする。
 
 ## 起動コマンド（動作確認済み）
 
@@ -72,9 +82,10 @@ speech-to-speech \
   --language ja \
   --no_enable_live_transcription \
   --llm_backend mlx-lm \
-  --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
+  --model_name mlx-community/Qwen3.5-9B-4bit \
   --tts qwen3 \
   --qwen3_tts_speaker ono_anna \
+  --qwen3_tts_mlx_quantization bf16 \
   --ws_host 127.0.0.1 --ws_port 8765
 ```
 
@@ -116,14 +127,21 @@ python3 broker.py   # 0.0.0.0:8787 で待受
 | 項目 | 選定 |
 |---|---|
 | STT | `mlx-audio-whisper` (whisper-large-v3-turbo, MLX) |
-| LLM | `mlx-lm` (`mlx-community/Qwen3-4B-Instruct-2507-bf16`) |
-| TTS | `qwen3` (Qwen3-TTS-1.7B-CustomVoice, 6bit, mlx-audio, speaker=`ono_anna`) |
+| LLM | `mlx-lm` (`mlx-community/Qwen3.5-9B-4bit`) |
+| TTS | `qwen3` (Qwen3-TTS-1.7B-CustomVoice, **bf16**, mlx-audio, speaker=`ono_anna`) |
 | Transport | WebRTC (`/v1/realtime/calls`) / WebSocket (`/v1/realtime`) |
 
 CustomVoiceモデルの話者一覧（`config.json`の`talker_config.spk_id`）:
 `serena, vivian, uncle_fu, ryan, aiden, ono_anna, sohee, eric, dylan`。
 デフォルトの`aiden`は低めの男性声で「怖いお兄さん」という感想が出たため、
 日本語アシスタント向けに`ono_anna`へ変更した（`--qwen3_tts_speaker`）。
+TTS量子化も6bit→bf16に上げて音質改善を試みた（無料でできる改善、
+それでもOpenAI TTSとの品質差は残る。12Hzコーデック自体の設計上の限界で、
+speech-to-speechが対応する他の内蔵TTS（chatTTS/facebookMMS/pocket/kokoro）に
+乗り換えても日本語で明確に上回る保証はない — 参考: [重要な発見]参照）。
+
+LLMは`Qwen3-4B`から`Qwen3.5-9B-4bit`に変更（下記「重要な発見」参照:
+4Bはtool callingが不安定なため）。
 
 ## 未完了 (Phase 1残タスク)
 
@@ -134,22 +152,28 @@ CustomVoiceモデルの話者一覧（`config.json`の`talker_config.spk_id`）:
    `Automotive_1408p_landscape` + ホストMacマイク、設定画面でLOCAL/`10.0.2.2`を選択）。
    「これはテストです」と発話 → 正しく認識・応答・音声再生まで確認
    （`--no_enable_live_transcription`修正後）。
-3. ~~発話終了から音声再生開始までのレイテンシ実測~~ → **完了**。実測値（1ターン、
-   Qwen3-4B-bf16、キャッシュ済み・コールドスタートではない状態）:
+3. ~~発話終了から音声再生開始までのレイテンシ実測~~ → **完了**。実測値（キャッシュ済み・
+   コールドスタートではない状態）:
 
-   | 区間 | 時間 |
-   |---|---|
-   | STT（VAD soft-end→transcription、MLXロック待ち含む） | 約1.2s |
-   | LLM生成（573 input tokens→11 output tokens） | 約3.2s |
-   | TTS初回音声チャンク（TTFA） | 0.19s |
-   | **発話終了→初回音声再生（サーバー計測 "last speech detected to first speech out"）** | **4.36s** |
+   | 構成 | STT | LLM生成 | TTS TTFA | 発話終了→初回音声再生 |
+   |---|---|---|---|---|
+   | Qwen3-4B-bf16 | 約1.2s | 約3.2s (11 output tok) | 0.19s | **4.36s** |
+   | Qwen3.5-9B-4bit + tool call | 約0.7s | 約4.1〜4.2s (29-34 output tok) | 0.26-0.32s | **4.5〜5.3s** |
 
-   ボトルネックはLLM生成（3.2s）。bf16の4Bモデルはこの用途には遅めで、
-   毎ターンのプロンプト再処理（システムプロンプト+tools schema、573トークン）が
-   効いている。体感速度を優先するなら4bit量子化モデルへの切り替えを検討する
-   （Phase 2でも同様に計測して比較する）。
+   9Bはtool callingが確実になった分、LLM生成が長くなり総レイテンシも増えた
+   （出力トークン数もtool呼び出し分だけ多い）。品質・確実性とレイテンシの
+   トレードオフとして、4B→9Bへの切り替えは妥当と判断（現在の推奨構成）。
+   Phase 2ではさらに大きいモデル（27B等）でこのトレードオフがどこまで
+   成り立つか計測する。
+
+4. **tool calling（function calling）動作確認 → 完了**。「YouTubeでフリーレンを
+   検索して」で`open_youtube_search`ツールが実際に呼び出されることを実機ログで確認
+   （`Tools: [ResponseFunctionToolCall(arguments='{"query": "フリーレン"}', ...)]`）。
+   Qwen3-4Bでは同じ依頼に対しツール呼び出しを発行せず平文で応答するだけだった
+   （「重要な発見」参照）。
 
 ## Phase 2 (予定): Mac Studio 256GB
 
 同じ構成を `--host 0.0.0.0` でMac Studio上に展開し、LLMを大きいサイズ
-（Qwen3.5-9B等）に差し替えて同じレイテンシ計測をやり直す。
+（Qwen3.5-27B等、現在のMacBook Pro側の基準値=Qwen3.5-9B-4bitとの比較）に
+差し替えて同じレイテンシ計測をやり直す。
