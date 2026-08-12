@@ -20,7 +20,7 @@ Apple Silicon上でローカル推論し、外部APIには一切依存しない�
   ツール（例: YouTube検索）をLLMが実際に呼び出し、`response.function_call_arguments.done`
   相当のイベントで結果を返す一連の往復を確認済み。
 
-## 構成
+## アーキテクチャ
 
 自作のWebRTCサーバーではなく、[huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech)
 の`--mode realtime`をそのまま使う。理由:
@@ -31,18 +31,82 @@ Apple Silicon上でローカル推論し、外部APIには一切依存しない�
 - STT/LLM/TTSがバックエンド登録制でプラグイン化されている → 差し替えは
   CLIフラグの変更だけで済む
 
-```text
-Android/VoiceInteractionAppSample (client)
-        │  WebRTC (SDP + oai-events data channel)
-        ▼
-this repo: broker.py (credential stub, :8787)
-        +
-speech-to-speech --mode realtime (:8765)
-        ├── VAD:  Silero VAD v5 + Smart Turn v3.2
-        ├── STT:  mlx-audio-whisper (whisper-large-v3-turbo, MLX)
-        ├── LLM:  mlx-lm (Qwen3.5-9B-4bit)
-        └── TTS:  qwen3 (Qwen3-TTS-1.7B-CustomVoice, mlx-audio)
+クライアント（およびクライアントを書く人）から見ると、接続先のホスト名を
+`api.openai.com`からこのMacに変えるだけで、あとは本物のOpenAI Realtime API
+（WebRTC）を叩いているのと同じシーケンスになる:
+
+```mermaid
+sequenceDiagram
+    participant C as Client<br/>(VoiceInteractionAppSample)
+    participant B as broker.py<br/>(:8787)
+    participant S as speech-to-speech<br/>--mode realtime (:8765)
+
+    Note over C,S: 本物のOpenAI Realtime API (WebRTC) と同じ契約をローカルで再現
+
+    C->>B: POST /api/realtime/session
+    B-->>C: clientSecret, expiresAt, sessionConfigVersion
+
+    C->>S: POST /v1/realtime/calls<br/>(SDP offer, Content-Type: application/sdp)
+    S-->>C: SDP answer (201 Created)
+    Note over C,S: WebRTC ICE/DTLS確立 → oai-events データチャネルopen
+
+    C->>S: session.update (tools, instructions, turn_detection...)
+    S-->>C: session.updated (echo back)
+
+    C->>S: 音声 (RTP, Opus 48kHz)
+    Note over S: VAD → STT → LLM → TTS（すべてローカル推論）
+    S-->>C: response.function_call_arguments.done（tool callがあれば）
+    S-->>C: 音声 (RTP, Opus 48kHz)
 ```
+
+サーバー内部はVAD→STT→LLM→TTSの直列パイプラインで、各段はCLIフラグで
+差し替え可能なバックエンド登録制になっている（今回選んだのが右側の実体）:
+
+```mermaid
+flowchart LR
+    A["Client<br/>(VoiceInteractionAppSample)"]
+
+    subgraph Mac["このMac — local_realtime_llm"]
+        direction TB
+        BR["broker.py<br/>:8787<br/>(session credential)"]
+        subgraph S2S["speech-to-speech --mode realtime  :8765"]
+            direction LR
+            VAD["VAD<br/>差し替え不可<br/>Silero v5 + Smart Turn v3.2"]
+            STT["STT ← 差し替え可能<br/>選択: mlx-audio-whisper<br/>(whisper-large-v3-turbo)"]
+            LLM["LLM ← 差し替え可能<br/>選択: mlx-lm<br/>(Qwen3.5-9B-4bit)"]
+            TTS["TTS ← 差し替え可能<br/>選択: qwen3<br/>(Qwen3-TTS-1.7B, mlx-audio)"]
+            VAD --> STT --> LLM --> TTS
+        end
+    end
+
+    A -- "① 認証情報" --> BR
+    A <-- "② WebRTC (SDP + oai-events)" --> S2S
+```
+
+## Mac (Apple Silicon) 向けにやっていること
+
+`speech-to-speech`自体はCUDA/Linuxが第一級だが、Darwin（macOS）向けの分岐が
+組み込まれている。ここで実際にやっているのはその分岐に乗ることで、新規に
+何かをMac用に書いたわけではない:
+
+- **推論バックエンドはMLX（Appleの配列/自動微分フレームワーク、Metal経由でGPUを使う）**。
+  `pyproject.toml`を見ると`mlx` / `mlx-lm` / `mlx-audio`は`platform_system == 'Darwin'`
+  条件でコア依存に入っており、CUDA版のような追加extraは不要。
+- **STT/TTSの各ハンドラはmacOS上では自動的にmlx-audio実装に切り替わる**
+  （例: `qwen3_tts_handler.py`は`platform == "darwin"`ならmlx-audioバックエンドを
+  選ぶ）。今回明示的に`--stt mlx-audio-whisper`/`--tts qwen3`を指定しているのは、
+  デフォルトSTT（Parakeet-TDT）が日本語非対応なための上書きで、TTSはmacOSの
+  デフォルト動作をそのまま使っている。
+- **`--device mps`**でMetal Performance Shadersを使う指定をしているが、
+  mlx-lm/mlx-audio自体はMLXが常にMetal上で動くため実質的な効果はSTT/TTS側の
+  一部フラグ向け。
+- **MLXはプロセス内で単一のMetal command queueを共有する**ため、STT/LLM/TTSを
+  同時に走らせるとクラッシュする（`Completed handler provided after commit call`）。
+  そのため`speech_to_speech.utils.mlx_lock.MLXLockContext`という排他ロックで
+  3段を直列化している。つまりUnified Memoryが大きくても「3モデルが完全並列で
+  GPUを使う」ことはない — レイテンシがSTT+LLM+TTSの単純合算に近くなる理由。
+- Python 3.14（Homebrewの既定）ではなく**3.12のvenv**を使っている。mlx系の
+  wheel公開が最新Pythonに追随しきっていないため。
 
 ## セットアップ
 
