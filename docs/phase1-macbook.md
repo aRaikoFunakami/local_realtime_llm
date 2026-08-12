@@ -46,6 +46,19 @@ STT/LLM/TTSに接続する。LLM/STT/TTSは差し替え可能にする。
   オファーにオーディオtransceiverが無いことが原因（データチャネルのみのofferだと
   aiortc側がエラーになる）。実クライアントは音声transceiverを必ず追加しているので
   問題にならない。
+- **`--enable_live_transcription`（デフォルトtrue）はSTT精度を壊す。必ず
+  `--no_enable_live_transcription` を付けること。** デフォルトのままだと、VADが
+  発話の完了を確認する前の最初の約0.88秒（`min_speech_ms`=384ms相当の窓）だけで
+  STTを実行し、それを最終結果として確定→以降の音声を「stale」として破棄してしまう
+  （`base_stt_handler`のログに`dropping stale STT input-after-final`と出る）。
+  「これはテストです」(約1.2秒)を話しても「これは」で切れる、あるいは全く違う内容に
+  ハルシネーションする（例:「ご視聴ありがとうございました」— Whisperの無音/短尺音声
+  への定番ハルシネーション）。`--no_enable_live_transcription`を付けると、VADの
+  `Speech soft-ended`→`Smart Turn: complete`を待ってから一度だけSTTが走るようになり、
+  正しく認識される。実機（AAOS emulator + ホストMacマイク）で確認済み。
+- 診断手法として、`STT/mlx_audio_whisper_handler.py`の`process()`冒頭に
+  `S2S_DUMP_AUDIO_DIR`環境変数でWAVダンプするフックを一時的に追加すると、実際に
+  Whisperへ渡っている音声を直接確認できる（venv内への一時パッチ、gitでは追跡されない）。
 
 ## 起動コマンド（動作確認済み）
 
@@ -57,9 +70,11 @@ speech-to-speech \
   --device mps \
   --stt mlx-audio-whisper \
   --language ja \
+  --no_enable_live_transcription \
   --llm_backend mlx-lm \
   --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
   --tts qwen3 \
+  --qwen3_tts_speaker ono_anna \
   --ws_host 127.0.0.1 --ws_port 8765
 ```
 
@@ -102,26 +117,37 @@ python3 broker.py   # 0.0.0.0:8787 で待受
 |---|---|
 | STT | `mlx-audio-whisper` (whisper-large-v3-turbo, MLX) |
 | LLM | `mlx-lm` (`mlx-community/Qwen3-4B-Instruct-2507-bf16`) |
-| TTS | `qwen3` (Qwen3-TTS-1.7B-CustomVoice, 6bit, mlx-audio) |
+| TTS | `qwen3` (Qwen3-TTS-1.7B-CustomVoice, 6bit, mlx-audio, speaker=`ono_anna`) |
 | Transport | WebRTC (`/v1/realtime/calls`) / WebSocket (`/v1/realtime`) |
+
+CustomVoiceモデルの話者一覧（`config.json`の`talker_config.spk_id`）:
+`serena, vivian, uncle_fu, ryan, aiden, ono_anna, sohee, eric, dylan`。
+デフォルトの`aiden`は低めの男性声で「怖いお兄さん」という感想が出たため、
+日本語アシスタント向けに`ono_anna`へ変更した（`--qwen3_tts_speaker`）。
 
 ## 未完了 (Phase 1残タスク)
 
 1. ~~`VoiceInteractionAppSample` のURLハードコードをローカルサーバーに向ける変更~~ →
    [#43](https://github.com/aRaikoFunakami/VoiceInteractionAppSample/issues/43) で対応済み
    （設定画面から切り替え可能に。PR #44, #45）。
-2. ~~実機/エミュレータでの通しの動作確認~~ → **接続プロトコル部分は確認済み**
-   （AAOS emulator `Automotive_1408p_landscape`、設定画面でLOCAL/`10.0.2.2`を選択、
-   `adb shell cmd voiceinteraction show` でセッション起動）。
-   credential取得(1012ms) → SDP offer/answer(2009ms) → ICE CONNECTED/COMPLETED(~2.5s) →
-   `session.created`/`session.updated`受信（日本語instructions・server_vad・
-   whisper-1/ja・tools一式が正しくecho backされている）→ マイク録音開始 →
-   無音のままidle timeout(10s)でクリーンに切断、をクライアント/サーバー両方のログで確認。
-   エラーなし。
-   **未検証**: 実際の発話→STT→LLM→TTS→再生。エミュレータの仮想マイクへホスト実マイクの
-   音声を通すには Extended Controls > Microphone > Enable Host Microphone Access を有効にし
-   人が実際に話す必要があり、自動化できないためユーザー自身の確認が必要。
-3. 発話終了から音声再生開始までのレイテンシ実測（上記の実発話テストと合わせて実施）。
+2. ~~実機/エミュレータでの通しの動作確認~~ → **完了**（AAOS emulator
+   `Automotive_1408p_landscape` + ホストMacマイク、設定画面でLOCAL/`10.0.2.2`を選択）。
+   「これはテストです」と発話 → 正しく認識・応答・音声再生まで確認
+   （`--no_enable_live_transcription`修正後）。
+3. ~~発話終了から音声再生開始までのレイテンシ実測~~ → **完了**。実測値（1ターン、
+   Qwen3-4B-bf16、キャッシュ済み・コールドスタートではない状態）:
+
+   | 区間 | 時間 |
+   |---|---|
+   | STT（VAD soft-end→transcription、MLXロック待ち含む） | 約1.2s |
+   | LLM生成（573 input tokens→11 output tokens） | 約3.2s |
+   | TTS初回音声チャンク（TTFA） | 0.19s |
+   | **発話終了→初回音声再生（サーバー計測 "last speech detected to first speech out"）** | **4.36s** |
+
+   ボトルネックはLLM生成（3.2s）。bf16の4Bモデルはこの用途には遅めで、
+   毎ターンのプロンプト再処理（システムプロンプト+tools schema、573トークン）が
+   効いている。体感速度を優先するなら4bit量子化モデルへの切り替えを検討する
+   （Phase 2でも同様に計測して比較する）。
 
 ## Phase 2 (予定): Mac Studio 256GB
 
