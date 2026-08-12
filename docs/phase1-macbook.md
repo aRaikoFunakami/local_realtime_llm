@@ -19,13 +19,15 @@ STT/LLM/TTSに接続する。LLM/STT/TTSは差し替え可能にする。
 ## クライアント側の契約（調査結果）
 
 - SDP交換: `POST https://api.openai.com/v1/realtime/calls` (Content-Type: application/sdp)
-  → `RealtimeWebRtcClient.kt` にハードコード。ローカルサーバーに向けるには
-  ここを書き換える必要がある（**未着手、Phase 1残タスク**）。
 - セッション認証情報: `POST http://10.0.2.2:8787/api/realtime/session` (emulatorから見た
   ホストPCのアドレス) → `{clientSecret, expiresAt, sessionConfigVersion}` を期待。
-  `HttpRealtimeCredentialProvider` はbrokerUrlを注入できる設計なので、ここは素直に
-  差し替え可能。
 - 日本語固定: `language: ja`, instructions は日本語の車載アシスタント想定。
+
+**[VoiceInteractionAppSample#43](https://github.com/aRaikoFunakami/VoiceInteractionAppSample/issues/43)
+で対応済み**: 設定画面（Settings > Apps > Default apps > Digital assistant app の歯車アイコン）
+からOpenAI/ローカルを切り替えられる。`RealtimeServerSettings.kt` の実装は
+このリポジトリのポート構成（broker=8787, calls=8765）とそのまま一致している。
+ローカルモードで使う際はホストに `10.0.2.2`（AVD）またはこのMacのLAN IPを入力する。
 
 ## 重要な発見
 
@@ -105,8 +107,9 @@ python3 broker.py   # 0.0.0.0:8787 で待受
 
 ## 未完了 (Phase 1残タスク)
 
-1. `VoiceInteractionAppSample` の `RealtimeWebRtcClient.kt` 内のURLハードコード
-   （`https://api.openai.com/v1/realtime/calls`）をローカルサーバーのURLに向ける変更。
+1. ~~`VoiceInteractionAppSample` のURLハードコードをローカルサーバーに向ける変更~~ →
+   [#43](https://github.com/aRaikoFunakami/VoiceInteractionAppSample/issues/43) で対応済み
+   （設定画面から切り替え可能に。PR #44, #45）。
 2. 実機/エミュレータでの通しの動作確認（発話→STT→LLM→TTS→再生）。
 3. 発話終了から音声再生開始までのレイテンシ実測。
 
