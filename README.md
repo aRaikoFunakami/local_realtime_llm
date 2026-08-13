@@ -119,6 +119,18 @@ uv sync
 ## 起動
 
 ```bash
+make setup   # uv sync + broker.py(:8787) + speech-to-speech(:8765) を起動、:8765の応答を待つ
+make down    # 両方停止
+make status  # ヘルスチェック
+make logs    # 両方のログをtail
+```
+
+`make setup`はPIDを`.run/`に記録し、既に起動中なら再起動せず現在のPIDを表示する
+（多重起動防止）。`Makefile`内のCLIフラグが実体で、下は同じコマンドの手動実行版:
+
+```bash
+uv run python broker.py > .run/broker.log 2>&1 &
+
 uv run speech-to-speech \
   --mode realtime \
   --device mps \
@@ -131,12 +143,6 @@ uv run speech-to-speech \
   --qwen3_tts_speaker ono_anna \
   --qwen3_tts_mlx_quantization bf16 \
   --ws_host 127.0.0.1 --ws_port 8765
-```
-
-別ターミナルでセッションブローカー（クライアントの認証情報取得先スタブ）を起動:
-
-```bash
-uv run python broker.py   # 0.0.0.0:8787
 ```
 
 ### モデルの扱い（自動ダウンロード / 事前ダウンロード）
@@ -168,13 +174,6 @@ uv run hf download mlx-community/Qwen3.5-9B-4bit --local-dir ./models/Qwen3.5-9B
 
 完全オフラインで起動できるか（＝必要なモデルが揃っているか）は
 `HF_HUB_OFFLINE=1 uv run speech-to-speech ...`で確認できる。
-
-ヘルスチェック:
-
-```bash
-curl -s http://127.0.0.1:8765/v1/pool
-curl -s http://127.0.0.1:8765/v1/usage
-```
 
 クライアント（VoiceInteractionAppSample）側は設定画面でLOCALモードを選び、
 ホストにこのMacのアドレス（AVDなら`10.0.2.2`、実機なら同一LAN上のIP）を入れる。
