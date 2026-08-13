@@ -70,6 +70,67 @@ STT/LLM/TTSに接続する。LLM/STT/TTSは差し替え可能にする。
   レイテンシは伸びる（下記参照）。品質とレイテンシのトレードオフとして4Bではなく
   9Bを最低ラインにする。
 
+## STT実装の速度比較調査（lightning-whisper-mlx / mlx-audio-whisper / whisper.cpp）
+
+`huggingface/speech-to-speech`が対応する`--stt whisper-mlx`（実体は
+`lightning-whisper-mlx`パッケージ、`speech_to_speech/STT/lightning_whisper_mlx_handler.py`）
+を試す過程で、現行採用の`mlx-audio-whisper`、および比較対象としてMLXを使わない
+`whisper.cpp`（Homebrew `whisper-cpp` パッケージの`whisper-cli`）を含めた3方式で
+日本語音声の文字起こし速度を計測した。
+
+### 日本語対応
+
+- `lightning-whisper-mlx`は`SUPPORTED_LANGUAGES`に`ja`を含み対応している。ただし
+  **`--stt_model_name`未指定時のデフォルト`distil-whisper/distil-large-v3`は
+  英語専用モデル**（`distil-large-v3`プリセットの実体は`mustafaaljadery/distil-whisper-mlx`）
+  で、日本語音声を渡すと英訳もどきの誤認識になる。日本語で使うには
+  `--stt_model_name large-v3`（多言語モデル）を明示する必要がある。
+- `speech-to-speech[webrtc]`にはこのextraが入っていないため、試すには
+  `pyproject.toml`の依存を`speech-to-speech[webrtc,whisper-mlx]`に変更し
+  `uv sync`が必要（`lightning-whisper-mlx>=0.0.10`が追加インストールされる）。
+
+### 計測方法
+
+- 短尺: macOS `say -v Kyoko`で合成した6.4秒の日本語音声
+  （「今日は東京で会議があります。午後三時に新宿駅で待ち合わせしましょう。」）
+- 長尺: 手元のYouTube文字起こし系動画音声から切り出した180秒クリップ
+- 各実装は逐次実行（同時実行するとMetalのGPUを取り合い計測が不正確になるため、
+  必ず1プロセスずつ計測すること）
+- `load`=モデルロード時間、`infer`=推論時間として分離して計測。
+  **実運用のサーバーはモデルを起動時に一度だけロードして常駐させるため、
+  毎ターン効くのは`infer`のみ**（`load`は起動時の一度きりのコスト）。
+
+### 結果
+
+| 実装 | モデル | load (6.4s) | infer (6.4s) | infer (180s) |
+|---|---|---|---|---|
+| mlx-audio-whisper | whisper-large-v3-turbo | 3.51s | **0.74s** | **8.18s** |
+| whisper.cpp (`whisper-cli`) | large-v3-turbo (ggml) | 0.41s | 0.90s | 10.9s |
+| lightning-whisper-mlx | large-v3 | 0.53s | 1.57s | 28.3s |
+
+文字起こし内容はいずれも短尺サンプルで正解文と完全一致。長尺サンプルでも
+lightning-whisper-mlx / mlx-audio-whisperの内容はほぼ一致（軽微な表記ゆれのみ）。
+
+### 結論
+
+- **`infer`だけで見るとmlx-audio-whisperが短尺・長尺とも最速**（現行構成を維持する
+  根拠）。whisper.cppが「合計」で勝って見えたのは、CLIを1発叩くたびに
+  モデルを再ロードするコスト（0.4秒程度）を含んでいたため。常駐サーバーの
+  実態とは前提が異なる比較だった。
+- whisper.cppは現状`ModuleArguments.stt`に未登録（`whisper` / `whisper-mlx` /
+  `mlx-audio-whisper` / `faster-whisper` / `parakeet-tdt` / `paraformer`のみ）。
+  使うには新規ハンドラの実装が要る。CLIをutteranceごとにsubprocess起動する方式では
+  毎回ロードし直しになり上記「合計」に近い数字になる。ロードを1回に抑えるには
+  `whisper-server`（同梱の常駐デーモン）をHTTP経由で叩く方式が必要だが未検証。
+- **`lightning-whisper-mlx`は短尺では悪くないが、180秒の長尺クリップでinferが
+  28秒（リアルタイム比0.16倍）まで悪化し3方式中最下位。** `batch_size=6`前提の
+  実装で、単一の連続長尺音声には効率よく効かない可能性が高い。今回のサーバーは
+  VAD区切りの短い発話単位でSTTを呼ぶ構成のため実害は小さいと見られるが、
+  積極的に採用する理由もない。
+- 現時点の判断: **`mlx-audio-whisper`を継続採用**。whisper.cpp化は
+  `whisper-server`常駐構成での実測（infer時間のみのフェア比較）が取れてから
+  再検討する。
+
 ## 起動コマンド（動作確認済み）
 
 ```bash
