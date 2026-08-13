@@ -10,13 +10,9 @@ Apple Silicon上でローカル推論し、外部APIには一切依存しない�
 
 ## できること
 
-- クライアントからは**OpenAIのRealtime API（WebRTC）と同じ契約**に見える
-  （`POST /v1/realtime/calls`、SDP offer/answer、`oai-events`データチャネル、
-  `session.update`/`session.updated`/`response.*`イベント）。クライアント側の
-  コードはOpenAI公式エンドポイントを叩くつもりで書いたものがそのまま動く。
-- **STT / LLM / TTSはすべて差し替え可能**（CLIフラグ一つ）。今回はMLX
-  （Apple Silicon）バックエンドを使い、モデル・GPUとも全部このMac上で動く。
-- **function calling（tool call）も動く**。クライアントがセッションに登録した
+- STT / LLM / TTSはCLIフラグで差し替え可能。今回はMLX（Apple Silicon）
+  バックエンドを使い、モデル・GPUとも全部このMac上で動く。
+- function calling（tool call）も動く。クライアントがセッションに登録した
   ツール（例: YouTube検索）をLLMが実際に呼び出し、`response.function_call_arguments.done`
   相当のイベントで結果を返す一連の往復を確認済み。
 
@@ -31,9 +27,9 @@ Apple Silicon上でローカル推論し、外部APIには一切依存しない�
 - STT/LLM/TTSがバックエンド登録制でプラグイン化されている → 差し替えは
   CLIフラグの変更だけで済む
 
-クライアント（およびクライアントを書く人）から見ると、接続先のホスト名を
-`api.openai.com`からこのMacに変えるだけで、あとは本物のOpenAI Realtime API
-（WebRTC）を叩いているのと同じシーケンスになる:
+クライアントから見ると、接続先のホスト名を`api.openai.com`からこのMacに
+変えるだけで、あとは本物のOpenAI Realtime API（WebRTC）を叩いているのと
+同じシーケンスになる:
 
 ```mermaid
 sequenceDiagram
@@ -60,7 +56,7 @@ sequenceDiagram
 ```
 
 サーバー内部はVAD→STT→LLM→TTSの直列パイプラインで、各段はCLIフラグで
-差し替え可能なバックエンド登録制になっている（今回選んだのが右側の実体）:
+差し替え可能なバックエンド登録制になっている。図中の各ボックスが今回選んだ実体:
 
 ```mermaid
 flowchart LR
@@ -89,23 +85,21 @@ flowchart LR
 組み込まれている。ここで実際にやっているのはその分岐に乗ることで、新規に
 何かをMac用に書いたわけではない:
 
-- **推論バックエンドはMLX（Appleの配列/自動微分フレームワーク、Metal経由でGPUを使う）**。
+- 推論バックエンドはMLX（Appleの配列/自動微分フレームワーク、Metal経由でGPUを使う）。
   `pyproject.toml`を見ると`mlx` / `mlx-lm` / `mlx-audio`は`platform_system == 'Darwin'`
   条件でコア依存に入っており、CUDA版のような追加extraは不要。
-- **STT/TTSの各ハンドラはmacOS上では自動的にmlx-audio実装に切り替わる**
+- STT/TTSの各ハンドラはmacOS上では自動的にmlx-audio実装に切り替わる
   （例: `qwen3_tts_handler.py`は`platform == "darwin"`ならmlx-audioバックエンドを
-  選ぶ）。今回明示的に`--stt mlx-audio-whisper`/`--tts qwen3`を指定しているのは、
-  デフォルトSTT（Parakeet-TDT）が日本語非対応なための上書きで、TTSはmacOSの
-  デフォルト動作をそのまま使っている。
-- **`--device mps`**でMetal Performance Shadersを使う指定をしているが、
+  選ぶ）。今回のTTSはこのmacOSデフォルト動作をそのまま使っている。
+- `--device mps`でMetal Performance Shadersを使う指定をしているが、
   mlx-lm/mlx-audio自体はMLXが常にMetal上で動くため実質的な効果はSTT/TTS側の
   一部フラグ向け。
-- **MLXはプロセス内で単一のMetal command queueを共有する**ため、STT/LLM/TTSを
+- MLXはプロセス内で単一のMetal command queueを共有するため、STT/LLM/TTSを
   同時に走らせるとクラッシュする（`Completed handler provided after commit call`）。
   そのため`speech_to_speech.utils.mlx_lock.MLXLockContext`という排他ロックで
-  3段を直列化している。つまりUnified Memoryが大きくても「3モデルが完全並列で
-  GPUを使う」ことはない — レイテンシがSTT+LLM+TTSの単純合算に近くなる理由。
-- Python 3.14（Homebrewの既定）ではなく**3.12のvenv**を使っている。mlx系の
+  3段を直列化している。Unified Memoryが大きくても3モデルが完全並列でGPUを
+  使うことはない — レイテンシがSTT+LLM+TTSの単純合算に近くなる理由。
+- Python 3.14（Homebrewの既定）ではなく3.12のvenvを使っている。mlx系の
   wheel公開が最新Pythonに追随しきっていないため。
 
 ## セットアップ
@@ -198,7 +192,7 @@ curl -s http://127.0.0.1:8765/v1/usage
 発話終了→初回音声再生: 約4.5〜5.3秒（内訳・トレードオフの詳細は
 [docs/phase1-macbook.md](docs/phase1-macbook.md)）。
 
-## ハマりどころ（詳細はdocs/参照）
+## 既知の問題と対処（詳細はdocs/参照）
 
 - デフォルトSTT（Parakeet-TDT）は日本語非対応 → `mlx-audio-whisper`を使う
 - `--enable_live_transcription`（デフォルトON）は発話の途中でSTTを確定してしまい
