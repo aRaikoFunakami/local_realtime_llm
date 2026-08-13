@@ -24,7 +24,11 @@ setup:
 			--mode realtime --device mps \
 			--stt mlx-audio-whisper --language ja --no_enable_live_transcription \
 			--llm_backend mlx-lm --model_name mlx-community/Qwen3.5-9B-4bit \
-			--tts qwen3 --qwen3_tts_speaker ono_anna --qwen3_tts_mlx_quantization bf16 \
+			--tts qwen3 \
+			--qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+			--qwen3_tts_speaker ono_anna \
+			--qwen3_tts_mlx_quantization bf16 \
+			--qwen3_tts_non_streaming_mode True \
 			--ws_host 127.0.0.1 --ws_port 8765 \
 			> $(SERVER_LOG) 2>&1 & echo $$! > $(SERVER_PID); \
 		echo "waiting for speech-to-speech on :8765 (model load, first run can take minutes)..."; \
