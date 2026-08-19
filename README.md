@@ -144,8 +144,14 @@ uv run speech-to-speech \
   --qwen3_tts_speaker ono_anna \
   --qwen3_tts_mlx_quantization bf16 \
   --qwen3_tts_non_streaming_mode True \
-  --ws_host 127.0.0.1 --ws_port 8765
+  --ws_host 0.0.0.0 --ws_port 8765
 ```
+
+> ⚠️ **注意**: `--ws_host 0.0.0.0`はLAN上の他端末（実機）からもWebSocketサーバーに
+> 接続できるようにする設定。認証や暗号化は無いため、信頼できないネットワーク
+> （公衆Wi-Fi等）に接続したまま起動しない、ファイアウォールで8765番ポートへの
+> 外部アクセスを制限するなど、利用環境には注意すること。実機からのアクセスが
+> 不要な場合は`127.0.0.1`のままにしておく方が安全。
 
 ### モデルの扱い（自動ダウンロード / 事前ダウンロード）
 
